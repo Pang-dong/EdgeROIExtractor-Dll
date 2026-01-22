@@ -18,7 +18,7 @@ namespace EdgeROIExtractor
             bool extendInwards = true, int selectedEdgeIndex = 0,
             bool saveVisualization = false, string outputPath = "")
         {
-            using (var extractor = new EdgeROIExtractor())
+            using (var extractor = new EdgeROIExtractorEngine())
             {
                 var parameters = new ExtractionParameters
                 {
@@ -52,7 +52,7 @@ namespace EdgeROIExtractor
             bool extendInwards = true, int selectedEdgeIndex = 0,
             bool saveVisualization = false, string outputPath = "")
         {
-            using (var extractor = new EdgeROIExtractor())
+            using (var extractor = new EdgeROIExtractorEngine())
             {
                 var parameters = new ExtractionParameters
                 {
@@ -86,7 +86,7 @@ namespace EdgeROIExtractor
             bool extendInwards = true, int selectedEdgeIndex = 0,
             bool saveVisualization = false, string outputPath = "")
         {
-            using (var extractor = new EdgeROIExtractor())
+            using (var extractor = new EdgeROIExtractorEngine())
             {
                 var parameters = new ExtractionParameters
                 {
@@ -212,7 +212,7 @@ namespace EdgeROIExtractor
         /// </summary>
         public static string GetVersion()
         {
-            return EdgeROIExtractor.Version;
+            return EdgeROIExtractorEngine.Version;
         }
     }
 }

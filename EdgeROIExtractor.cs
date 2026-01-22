@@ -13,7 +13,7 @@ namespace EdgeROIExtractor
     /// <summary>
     /// 边缘ROI提取器
     /// </summary>
-    public class EdgeROIExtractor : IDisposable
+    public class EdgeROIExtractorEngine : IDisposable
     {
         private bool _disposed = false;
 
@@ -748,7 +748,7 @@ namespace EdgeROIExtractor
             }
         }
 
-        ~EdgeROIExtractor()
+        ~EdgeROIExtractorEngine()
         {
             Dispose(false);
         }
