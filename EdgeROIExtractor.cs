@@ -480,7 +480,7 @@ namespace EdgeROIExtractor
                             selectionPoints[i] = new Point((int)roi.SelectionArea[i].X, (int)roi.SelectionArea[i].Y);
                         }
 
-                        // 绘制实际裁剪的矩形框 (新增)
+                        // 绘制实际裁剪的矩形框 (新增)框选区域是按照边缘向量方向生成的，这样裁剪出来的图像会导致SFR算法失效，所以实际裁剪时要裁剪一个正矩形
                         Rect cropRect = new Rect((int)roi.RoiLocation.X, (int)roi.RoiLocation.Y, roi.Width, roi.Height);
                         Cv2.Rectangle(colorImage, cropRect, new Scalar(0, 255, 255), 1); // 黄色表示实际裁剪框
 
