@@ -20,16 +20,11 @@ namespace EdgeROIExtractor
         /// <summary>
         /// 版本信息
         /// </summary>
-        public static string Version => "1.0.0";
+        public static string Version => "1.1.0-NoWarp";
 
         /// <summary>
         /// 从灰度图像中提取ROI
         /// </summary>
-        /// <param name="grayImageData">灰度图像数据（8位）</param>
-        /// <param name="width">图像宽度</param>
-        /// <param name="height">图像高度</param>
-        /// <param name="parameters">提取参数</param>
-        /// <returns>ROI提取结果</returns>
         public ROIResults ExtractROIs(byte[] grayImageData, int width, int height,
             ExtractionParameters parameters = null)
         {
@@ -74,14 +69,11 @@ namespace EdgeROIExtractor
 
             try
             {
-                // 使用 Mat.FromPixelData 替代已过时的构造函数
                 unsafe
                 {
                     fixed (byte* p = grayImageData)
                     {
                         IntPtr dataPtr = new IntPtr(p);
-
-                        // 使用 Mat.FromPixelData 创建 Mat 对象
                         using (var srcGray = Mat.FromPixelData(height, width, MatType.CV_8UC1, dataPtr))
                         {
                             // 处理图像并提取ROI
@@ -91,7 +83,6 @@ namespace EdgeROIExtractor
                             if ((parameters.SaveVisualization || parameters.ReturnVisualizationData)
                                 && results.Success && results.Results.Count > 0)
                             {
-                                // 创建可视化图像
                                 byte[] visualizationData = CreateVisualizationImage(
                                     srcGray, results, parameters,
                                     out int vizWidth, out int vizHeight);
@@ -99,13 +90,11 @@ namespace EdgeROIExtractor
                                 results.VisualizationWidth = vizWidth;
                                 results.VisualizationHeight = vizHeight;
 
-                                // 如果需要返回数据
                                 if (parameters.ReturnVisualizationData)
                                 {
                                     results.VisualizationImageData = visualizationData;
                                 }
 
-                                // 如果需要保存到文件
                                 if (parameters.SaveVisualization && visualizationData != null)
                                 {
                                     string savePath = SaveVisualizationToFile(
@@ -131,7 +120,7 @@ namespace EdgeROIExtractor
         }
 
         /// <summary>
-        /// 从彩色图像中提取ROI（自动转换为灰度）
+        /// 从彩色图像中提取ROI（修改：提取绿色通道以匹配手动工具）
         /// </summary>
         public ROIResults ExtractROIsFromColor(byte[] colorImageData, int width, int height,
             int channels, ExtractionParameters parameters = null)
@@ -148,7 +137,6 @@ namespace EdgeROIExtractor
 
             try
             {
-                // 使用 Mat.FromPixelData 替代已过时的构造函数
                 unsafe
                 {
                     fixed (byte* p = colorImageData)
@@ -158,24 +146,17 @@ namespace EdgeROIExtractor
                         // 确定Mat类型
                         MatType matType = channels == 3 ? MatType.CV_8UC3 : MatType.CV_8UC4;
 
-                        // 使用 Mat.FromPixelData 创建彩色图像Mat
                         using (var colorMat = Mat.FromPixelData(height, width, matType, dataPtr))
                         using (var grayMat = new Mat())
                         {
-                            // 转换为灰度图像
-                            Cv2.CvtColor(colorMat, grayMat,
-                                channels == 3 ? ColorConversionCodes.BGR2GRAY : ColorConversionCodes.BGRA2GRAY);
+                            // [关键修改]：提取绿色通道 (Green Channel, Index 1) 
+                            // 之前的 BGR2GRAY 会混合三个通道，可能降低锐度。
+                            // SFR测试通常推荐使用未经混合的 RAW 或 绿色通道。
+                            Cv2.ExtractChannel(colorMat, grayMat, 1);
 
                             // 提取灰度图像数据
                             byte[] grayData = new byte[grayMat.Rows * grayMat.Cols];
-                            unsafe
-                            {
-                                byte* grayDataPtr = (byte*)grayMat.Data.ToPointer();
-                                for (int i = 0; i < grayData.Length; i++)
-                                {
-                                    grayData[i] = grayDataPtr[i];
-                                }
-                            }
+                            Marshal.Copy(grayMat.Data, grayData, 0, grayData.Length);
 
                             return ExtractROIs(grayData, grayMat.Cols, grayMat.Rows, parameters);
                         }
@@ -200,19 +181,19 @@ namespace EdgeROIExtractor
 
             try
             {
-                // 读取图像
-                using (var mat = Cv2.ImRead(filePath, ImreadModes.Grayscale))
+                // [关键修改]：加载为彩色以提取绿色通道
+                using (var mat = Cv2.ImRead(filePath, ImreadModes.Color))
                 {
                     if (mat.Empty())
                     {
                         return new ROIResults { Success = false, ErrorMessage = $"无法读取图像: {filePath}" };
                     }
 
-                    // 提取图像数据
-                    byte[] imageData = new byte[mat.Rows * mat.Cols];
+                    int channels = mat.Channels();
+                    byte[] imageData = new byte[mat.Rows * mat.Cols * channels];
                     Marshal.Copy(mat.Data, imageData, 0, imageData.Length);
 
-                    return ExtractROIs(imageData, mat.Cols, mat.Rows, parameters);
+                    return ExtractROIsFromColor(imageData, mat.Cols, mat.Rows, channels, parameters);
                 }
             }
             catch (Exception ex)
@@ -221,9 +202,6 @@ namespace EdgeROIExtractor
             }
         }
 
-        /// <summary>
-        /// 处理图像并提取ROI
-        /// </summary>
         private void ProcessImage(Mat srcGray, ExtractionParameters parameters, ROIResults results)
         {
             // 1) 自适应二值化
@@ -268,7 +246,6 @@ namespace EdgeROIExtractor
                     if (area < parameters.MinArea || area > parameters.MaxArea)
                         continue;
 
-                    // 多边形近似
                     double peri = Cv2.ArcLength(contour, true);
                     Point[] approx = Cv2.ApproxPolyDP(contour,
                         parameters.ApproximationAccuracy * peri, true);
@@ -294,36 +271,28 @@ namespace EdgeROIExtractor
             }
         }
 
-        /// <summary>
-        /// 处理单个四边形并提取ROI
-        /// </summary>
         private ROIResult ProcessQuadrilateral(Mat srcGray, Point[] quadrilateral,
             int index, ExtractionParameters parameters)
         {
             try
             {
-                // 获取四边形的四个角点
                 Point p1 = quadrilateral[0], p2 = quadrilateral[1],
                       p3 = quadrilateral[2], p4 = quadrilateral[3];
 
-                // 计算四边形的中心点
                 Moments m = Cv2.Moments(quadrilateral);
-                if (Math.Abs(m.M00) < 1e-6)
-                    return null;
+                if (Math.Abs(m.M00) < 1e-6) return null;
 
                 Point2f center = new Point2f(
                     (float)(m.M10 / m.M00),
                     (float)(m.M01 / m.M00)
                 );
 
-                // 定义四条边
                 Point[][] edges = new Point[4][];
-                edges[0] = new Point[] { p1, p2 };  // 边1：p1→p2
-                edges[1] = new Point[] { p2, p3 };  // 边2：p2→p3
-                edges[2] = new Point[] { p3, p4 };  // 边3：p3→p4
-                edges[3] = new Point[] { p4, p1 };  // 边4：p4→p1
+                edges[0] = new Point[] { p1, p2 };
+                edges[1] = new Point[] { p2, p3 };
+                edges[2] = new Point[] { p3, p4 };
+                edges[3] = new Point[] { p4, p1 };
 
-                // 获取选中的边
                 int selectedEdgeIndex = parameters.SelectedEdgeIndex;
                 if (selectedEdgeIndex < 0) selectedEdgeIndex = 0;
                 if (selectedEdgeIndex > 3) selectedEdgeIndex = 3;
@@ -331,37 +300,27 @@ namespace EdgeROIExtractor
                 Point startPoint = edges[selectedEdgeIndex][0];
                 Point endPoint = edges[selectedEdgeIndex][1];
 
-                // 计算边的方向向量
                 Point direction = new Point(endPoint.X - startPoint.X, endPoint.Y - startPoint.Y);
                 double edgeLength = Math.Sqrt(direction.X * direction.X + direction.Y * direction.Y);
 
-                if (edgeLength < 10)
-                    return null;
+                if (edgeLength < 10) return null;
 
-                // 计算法向量（垂直于边的方向）
                 Point normal = new Point(-direction.Y, direction.X);
                 double normalLength = Math.Sqrt(normal.X * normal.X + normal.Y * normal.Y);
+                if (normalLength < 1e-6) return null;
 
-                if (normalLength < 1e-6)
-                    return null;
-
-                // 计算单位向量
                 double scaleFactor = 100.0;
                 Point normalUnit = new Point(
                     (int)(normal.X / normalLength * scaleFactor),
                     (int)(normal.Y / normalLength * scaleFactor)
                 );
 
-                // 确定框选方向
                 int directionSign = parameters.ExtendInwards ? -1 : 1;
-
-                // 计算边的中点
                 Point edgeMidPoint = new Point(
                     (startPoint.X + endPoint.X) / 2,
                     (startPoint.Y + endPoint.Y) / 2
                 );
 
-                // 计算从边中点出发的向量
                 Point fromMidToStart = new Point(
                     startPoint.X - edgeMidPoint.X,
                     startPoint.Y - edgeMidPoint.Y
@@ -371,7 +330,6 @@ namespace EdgeROIExtractor
                     endPoint.Y - edgeMidPoint.Y
                 );
 
-                // 缩放边的端点（控制框选长度）
                 float lengthScale = (float)parameters.ExtensionLength / 100.0f;
                 Point scaledStart = new Point(
                     edgeMidPoint.X + (int)(fromMidToStart.X * lengthScale),
@@ -382,7 +340,6 @@ namespace EdgeROIExtractor
                     edgeMidPoint.Y + (int)(fromMidToEnd.Y * lengthScale)
                 );
 
-                // 计算框选矩形的四个角点
                 int widthOffset = parameters.ExtensionWidth * (int)scaleFactor / 100;
                 Point[] selectionRect = new Point[4];
 
@@ -390,26 +347,20 @@ namespace EdgeROIExtractor
                     scaledStart.X + normalUnit.X * directionSign * widthOffset / (int)scaleFactor,
                     scaledStart.Y + normalUnit.Y * directionSign * widthOffset / (int)scaleFactor
                 );
-
                 selectionRect[1] = new Point(
                     scaledEnd.X + normalUnit.X * directionSign * widthOffset / (int)scaleFactor,
                     scaledEnd.Y + normalUnit.Y * directionSign * widthOffset / (int)scaleFactor
                 );
-
                 selectionRect[2] = new Point(
                     scaledEnd.X - normalUnit.X * directionSign * widthOffset / (int)scaleFactor,
                     scaledEnd.Y - normalUnit.Y * directionSign * widthOffset / (int)scaleFactor
                 );
-
                 selectionRect[3] = new Point(
                     scaledStart.X - normalUnit.X * directionSign * widthOffset / (int)scaleFactor,
                     scaledStart.Y - normalUnit.Y * directionSign * widthOffset / (int)scaleFactor
                 );
 
-                // 提取ROI区域
-                return ExtractROI(srcGray, selectionRect,
-                    parameters.ExtensionWidth, (int)edgeLength,
-                    quadrilateral, center, selectedEdgeIndex, index);
+                return ExtractROI(srcGray, selectionRect, quadrilateral, center, selectedEdgeIndex, index);
             }
             catch (Exception ex)
             {
@@ -419,70 +370,78 @@ namespace EdgeROIExtractor
         }
 
         /// <summary>
-        /// 提取ROI区域
+        /// [关键修改] 提取ROI区域：使用外接矩形直接裁剪，不进行透视变换
         /// </summary>
         private ROIResult ExtractROI(Mat srcGray, Point[] selectionRect,
-            int roiHeight, int roiWidth,
             Point[] quadrilateral, Point2f center, int edgeIndex, int index)
         {
             try
             {
-                // 将Point转换为Point2f
-                Point2f[] srcPoints = new Point2f[4];
-                for (int i = 0; i < 4; i++)
+                // 1. 计算 selectionRect 的外接矩形 (Bounding Rect)
+                // 这样可以保留边缘在原始图像中的倾斜角度，这对SFR计算至关重要
+                int minX = int.MaxValue, minY = int.MaxValue;
+                int maxX = int.MinValue, maxY = int.MinValue;
+
+                foreach (var pt in selectionRect)
                 {
-                    srcPoints[i] = new Point2f(selectionRect[i].X, selectionRect[i].Y);
+                    if (pt.X < minX) minX = pt.X;
+                    if (pt.X > maxX) maxX = pt.X;
+                    if (pt.Y < minY) minY = pt.Y;
+                    if (pt.Y > maxY) maxY = pt.Y;
                 }
 
-                // 目标矩形顶点
-                Point2f[] dstPoints = new Point2f[4]
-                {
-                    new Point2f(0, 0),
-                    new Point2f(roiWidth, 0),
-                    new Point2f(roiWidth, roiHeight),
-                    new Point2f(0, roiHeight)
-                };
+                // 2. 限制在图像范围内
+                minX = Math.Max(0, minX);
+                minY = Math.Max(0, minY);
+                maxX = Math.Min(srcGray.Width, maxX);
+                maxY = Math.Min(srcGray.Height, maxY);
 
-                // 计算透视变换矩阵
-                using (var transformMatrix = Cv2.GetPerspectiveTransform(srcPoints, dstPoints))
+                int width = maxX - minX;
+                int height = maxY - minY;
+
+                if (width <= 0 || height <= 0) return null;
+
+                Rect roiRect = new Rect(minX, minY, width, height);
+
+                // 3. 直接裁剪 (Crop)
+                using (var roiMat = new Mat(srcGray, roiRect))
                 {
-                    // 进行透视变换
-                    using (var roiMat = new Mat())
+                    // 将Mat转换为字节数组
+                    byte[] imageData = new byte[roiMat.Rows * roiMat.Cols];
+
+                    // 注意：这里需要考虑内存连续性，Mat的子图可能不连续
+                    if (roiMat.IsContinuous())
                     {
-                        Cv2.WarpPerspective(srcGray, roiMat, transformMatrix,
-                            new Size(roiWidth, roiHeight));
-
-                        // 将Mat转换为字节数组
-                        byte[] imageData = new byte[roiMat.Rows * roiMat.Cols];
                         Marshal.Copy(roiMat.Data, imageData, 0, imageData.Length);
-
-                        // 创建ROI结果对象
-                        var result = new ROIResult
-                        {
-                            ImageData = imageData,
-                            Width = roiWidth,
-                            Height = roiHeight,
-                            Center = new PointF(center.X, center.Y),
-                            EdgeIndex = edgeIndex,
-                            RoiLocation = new PointF(srcPoints[0].X, srcPoints[0].Y)
-                        };
-
-                        // 保存原始四边形顶点
-                        for (int i = 0; i < 4; i++)
-                        {
-                            result.Quadrilateral[i] = new PointF(
-                                quadrilateral[i].X, quadrilateral[i].Y);
-                        }
-
-                        // 保存框选区域顶点
-                        for (int i = 0; i < 4; i++)
-                        {
-                            result.SelectionArea[i] = new PointF(
-                                selectionRect[i].X, selectionRect[i].Y);
-                        }
-
-                        return result;
                     }
+                    else
+                    {
+                        // 如果不连续，逐行复制
+                        for (int i = 0; i < roiMat.Rows; i++)
+                        {
+                            IntPtr srcPtr = roiMat.Ptr(i);
+                            Marshal.Copy(srcPtr, imageData, i * roiMat.Cols, roiMat.Cols);
+                        }
+                    }
+
+                    // 创建ROI结果对象
+                    var result = new ROIResult
+                    {
+                        ImageData = imageData,
+                        Width = width,   // 使用实际裁剪的宽度
+                        Height = height, // 使用实际裁剪的高度
+                        Center = new PointF(center.X, center.Y),
+                        EdgeIndex = edgeIndex,
+                        RoiLocation = new PointF(minX, minY)
+                    };
+
+                    for (int i = 0; i < 4; i++)
+                    {
+                        result.Quadrilateral[i] = new PointF(quadrilateral[i].X, quadrilateral[i].Y);
+                        result.SelectionArea[i] = new PointF(selectionRect[i].X, selectionRect[i].Y);
+                    }
+
+                    return result;
                 }
             }
             catch (Exception ex)
@@ -492,55 +451,39 @@ namespace EdgeROIExtractor
             }
         }
 
-        /// <summary>
-        /// 创建可视化图像
-        /// </summary>
         private byte[] CreateVisualizationImage(Mat srcGray, ROIResults results,
             ExtractionParameters parameters, out int width, out int height)
         {
-            width = 0;
-            height = 0;
-
-            if (srcGray == null || srcGray.Empty() || results == null || results.Results.Count == 0)
-                return null;
+            width = 0; height = 0;
+            if (srcGray == null || srcGray.Empty()) return null;
 
             try
             {
                 using (var colorImage = new Mat())
                 {
-                    // 转换为彩色图像
                     Cv2.CvtColor(srcGray, colorImage, ColorConversionCodes.GRAY2BGR);
 
-                    // 绘制每个ROI
                     foreach (var roi in results.Results)
                     {
-                        // 绘制原始四边形（蓝色）
+                        // 绘制原始四边形
                         for (int i = 0; i < 4; i++)
                         {
-                            Point p1 = new Point((int)roi.Quadrilateral[i].X,
-                                                 (int)roi.Quadrilateral[i].Y);
-                            Point p2 = new Point((int)roi.Quadrilateral[(i + 1) % 4].X,
-                                                 (int)roi.Quadrilateral[(i + 1) % 4].Y);
+                            Point p1 = new Point((int)roi.Quadrilateral[i].X, (int)roi.Quadrilateral[i].Y);
+                            Point p2 = new Point((int)roi.Quadrilateral[(i + 1) % 4].X, (int)roi.Quadrilateral[(i + 1) % 4].Y);
                             Cv2.Line(colorImage, p1, p2, new Scalar(255, 0, 0), 2);
                         }
 
-                        // 绘制框选区域（绿色半透明）
+                        // 绘制框选区域 (注意：现在是外接矩形内的旋转区域，依然画出来方便看)
                         Point[] selectionPoints = new Point[4];
                         for (int i = 0; i < 4; i++)
                         {
-                            selectionPoints[i] = new Point((int)roi.SelectionArea[i].X,
-                                                           (int)roi.SelectionArea[i].Y);
+                            selectionPoints[i] = new Point((int)roi.SelectionArea[i].X, (int)roi.SelectionArea[i].Y);
                         }
 
-                        // 先填充半透明区域
-                        using (Mat overlay = colorImage.Clone())
-                        {
-                            Cv2.FillPoly(overlay, new Point[][] { selectionPoints },
-                                       new Scalar(0, 255, 0, 128));
-                            Cv2.AddWeighted(overlay, 0.3, colorImage, 0.7, 0, colorImage);
-                        }
+                        // 绘制实际裁剪的矩形框 (新增)
+                        Rect cropRect = new Rect((int)roi.RoiLocation.X, (int)roi.RoiLocation.Y, roi.Width, roi.Height);
+                        Cv2.Rectangle(colorImage, cropRect, new Scalar(0, 255, 255), 1); // 黄色表示实际裁剪框
 
-                        // 绘制边框
                         for (int i = 0; i < 4; i++)
                         {
                             Point p1 = selectionPoints[i];
@@ -548,72 +491,23 @@ namespace EdgeROIExtractor
                             Cv2.Line(colorImage, p1, p2, new Scalar(0, 255, 0), 2);
                         }
 
-                        // 标记选中的边（红色）
+                        // 标记选中的边
                         int edgeIndex = roi.EdgeIndex;
                         if (edgeIndex >= 0 && edgeIndex < 4)
                         {
-                            Point p1 = new Point((int)roi.Quadrilateral[edgeIndex].X,
-                                                 (int)roi.Quadrilateral[edgeIndex].Y);
-                            Point p2 = new Point((int)roi.Quadrilateral[(edgeIndex + 1) % 4].X,
-                                                 (int)roi.Quadrilateral[(edgeIndex + 1) % 4].Y);
+                            Point p1 = new Point((int)roi.Quadrilateral[edgeIndex].X, (int)roi.Quadrilateral[edgeIndex].Y);
+                            Point p2 = new Point((int)roi.Quadrilateral[(edgeIndex + 1) % 4].X, (int)roi.Quadrilateral[(edgeIndex + 1) % 4].Y);
                             Cv2.Line(colorImage, p1, p2, new Scalar(0, 0, 255), 3);
                         }
 
-                        // 绘制中心点（红色）
-                        Cv2.Circle(colorImage,
-                            new Point((int)roi.Center.X, (int)roi.Center.Y),
-                            6, Scalar.Red, -1);
-
-                        // 标记每个顶点
-                        for (int i = 0; i < 4; i++)
-                        {
-                            Point p = new Point((int)roi.Quadrilateral[i].X,
-                                                (int)roi.Quadrilateral[i].Y);
-                            Cv2.Circle(colorImage, p, 5, new Scalar(255, 255, 0), -1);
-                            Cv2.PutText(colorImage, $"P{i + 1}", new Point(p.X + 5, p.Y - 5),
-                                      HersheyFonts.HersheySimplex, 0.5, new Scalar(255, 255, 0), 1);
-                        }
-
-                        // 在四边形中心显示序号
                         Cv2.PutText(colorImage, $"#{results.Results.IndexOf(roi)}",
-                                  new Point((int)roi.Center.X - 10, (int)roi.Center.Y + 5),
+                                  new Point((int)roi.Center.X, (int)roi.Center.Y),
                                   HersheyFonts.HersheySimplex, 0.7, Scalar.Red, 2);
                     }
 
-                    // 添加参数信息
-                    if (parameters.ShowParametersOnImage)
-                    {
-                        string paramText = $"Width: {parameters.ExtensionWidth}, " +
-                                          $"Length: {parameters.ExtensionLength}, " +
-                                          $"Edge: E{parameters.SelectedEdgeIndex}, " +
-                                          $"Inward: {parameters.ExtendInwards}";
-
-                        // 添加背景框
-                        int baseline = 0;
-                        var textSize = Cv2.GetTextSize(paramText, HersheyFonts.HersheySimplex, 0.6, 1, out baseline);
-                        Cv2.Rectangle(colorImage, new Point(10, 10),
-                                     new Point(10 + textSize.Width + 10, 10 + textSize.Height + baseline + 10),
-                                     new Scalar(0, 0, 0, 200), -1);
-
-                        Cv2.PutText(colorImage, paramText, new Point(15, 15 + textSize.Height),
-                                  HersheyFonts.HersheySimplex, 0.6, new Scalar(255, 255, 255), 1);
-
-                        // 添加结果信息
-                        string resultText = $"Found: {results.Results.Count} ROI(s), " +
-                                           $"Time: {results.ProcessingTimeMs}ms";
-                        var resultTextSize = Cv2.GetTextSize(resultText, HersheyFonts.HersheySimplex, 0.6, 1, out baseline);
-                        Cv2.Rectangle(colorImage, new Point(10, 40),
-                                     new Point(10 + resultTextSize.Width + 10, 40 + resultTextSize.Height + baseline + 10),
-                                     new Scalar(0, 0, 0, 200), -1);
-
-                        Cv2.PutText(colorImage, resultText, new Point(15, 45 + resultTextSize.Height),
-                                  HersheyFonts.HersheySimplex, 0.6, new Scalar(255, 255, 255), 1);
-                    }
-
-                    // 转换为字节数组
                     width = colorImage.Cols;
                     height = colorImage.Rows;
-                    byte[] imageData = new byte[width * height * 3]; // RGB = 3通道
+                    byte[] imageData = new byte[width * height * 3];
                     Marshal.Copy(colorImage.Data, imageData, 0, imageData.Length);
 
                     return imageData;
@@ -626,109 +520,36 @@ namespace EdgeROIExtractor
             }
         }
 
-        /// <summary>
-        /// 保存可视化图像到文件
-        /// </summary>
         private string SaveVisualizationToFile(byte[] imageData, int width, int height,
             ExtractionParameters parameters)
         {
-            if (imageData == null || imageData.Length == 0)
-                return null;
-
+            if (imageData == null || imageData.Length == 0) return null;
             try
             {
-                // 确定保存路径
-                string savePath;
-                if (!string.IsNullOrEmpty(parameters.VisualizationPath))
+                string savePath = parameters.VisualizationPath;
+                if (string.IsNullOrEmpty(savePath))
                 {
-                    // 如果指定了完整路径，使用指定路径
-                    savePath = parameters.VisualizationPath;
-                }
-                else
-                {
-                    // 否则保存到运行目录
-                    string directory = Directory.GetCurrentDirectory();
                     string fileName = parameters.VisualizationFileName;
-
-                    // 确保文件名包含扩展名
-                    if (string.IsNullOrEmpty(Path.GetExtension(fileName)))
-                    {
-                        fileName += ".png";
-                    }
-
-                    savePath = Path.Combine(directory, fileName);
-
-                    // 如果文件已存在，添加时间戳
-                    if (File.Exists(savePath))
-                    {
-                        string timeStamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-                        string fileNameWithoutExt = Path.GetFileNameWithoutExtension(fileName);
-                        string fileExt = Path.GetExtension(fileName);
-                        fileName = $"{fileNameWithoutExt}_{timeStamp}{fileExt}";
-                        savePath = Path.Combine(directory, fileName);
-                    }
+                    if (string.IsNullOrEmpty(Path.GetExtension(fileName))) fileName += ".png";
+                    savePath = Path.Combine(Directory.GetCurrentDirectory(), fileName);
                 }
 
-                // 使用 Mat.FromPixelData 从字节数组创建Mat
                 unsafe
                 {
                     fixed (byte* p = imageData)
                     {
                         IntPtr dataPtr = new IntPtr(p);
-
-                        // 使用 Mat.FromPixelData 创建Mat（RGB，3通道）
                         using (var mat = Mat.FromPixelData(height, width, MatType.CV_8UC3, dataPtr))
                         {
-                            string extension = Path.GetExtension(savePath).ToLower();
-                            var imwriteParams = new int[2];
-
-                            if (extension == ".jpg" || extension == ".jpeg")
-                            {
-                                // JPEG质量参数
-                                imwriteParams = new int[]
-                                {
-                            (int)ImwriteFlags.JpegQuality,
-                            parameters.ImageQuality
-                                };
-                            }
-                            else if (extension == ".png")
-                            {
-                                // PNG压缩级别（0-9，0是无压缩，9是最大压缩）
-                                int compressionLevel = 9 - (parameters.ImageQuality / 10);
-                                compressionLevel = Math.Max(0, Math.Min(9, compressionLevel));
-                                imwriteParams = new int[]
-                                {
-                            (int)ImwriteFlags.PngCompression,
-                            compressionLevel
-                                };
-                            }
-
-                            bool saveResult = Cv2.ImWrite(savePath, mat, imwriteParams);
-
-                            if (saveResult)
-                            {
-                                Console.WriteLine($"[INFO] 可视化图像已保存到: {savePath}");
-                                return savePath;
-                            }
-                            else
-                            {
-                                Console.WriteLine($"[ERROR] 保存可视化图像失败: {savePath}");
-                                return null;
-                            }
+                            Cv2.ImWrite(savePath, mat);
+                            return savePath;
                         }
                     }
                 }
             }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[ERROR] 保存可视化图像时发生错误: {ex.Message}");
-                return null;
-            }
+            catch (Exception) { return null; }
         }
 
-        /// <summary>
-        /// 释放资源
-        /// </summary>
         public void Dispose()
         {
             Dispose(true);
@@ -737,15 +558,7 @@ namespace EdgeROIExtractor
 
         protected virtual void Dispose(bool disposing)
         {
-            if (!_disposed)
-            {
-                if (disposing)
-                {
-                    // 释放托管资源
-                }
-
-                _disposed = true;
-            }
+            if (!_disposed) { _disposed = true; }
         }
 
         ~EdgeROIExtractorEngine()
