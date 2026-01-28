@@ -372,13 +372,15 @@ namespace EdgeROIExtractor
         /// <summary>
         /// [关键修改] 提取ROI区域：使用外接矩形直接裁剪，不进行透视变换
         /// </summary>
+       /// <summary>
+        /// [修改版] 提取ROI区域：自动处理旋转 + 强制4字节内存对齐
+        /// </summary>
         private ROIResult ExtractROI(Mat srcGray, Point[] selectionRect,
             Point[] quadrilateral, Point2f center, int edgeIndex, int index)
         {
             try
             {
                 // 1. 计算 selectionRect 的外接矩形 (Bounding Rect)
-                // 这样可以保留边缘在原始图像中的倾斜角度，这对SFR计算至关重要
                 int minX = int.MaxValue, minY = int.MaxValue;
                 int maxX = int.MinValue, maxY = int.MinValue;
 
@@ -389,8 +391,20 @@ namespace EdgeROIExtractor
                     if (pt.Y < minY) minY = pt.Y;
                     if (pt.Y > maxY) maxY = pt.Y;
                 }
+                int rawWidth = maxX - minX;
+                if (rawWidth % 4 != 0)
+                {
+                    int padding = 4 - (rawWidth % 4);
+                    maxX += padding; // 向右扩展
+                }
 
-                // 2. 限制在图像范围内
+                // 修正 Y 轴 (Height) - 即使是高度也建议对齐，因为旋转后高度会变成宽度
+                int rawHeight = maxY - minY;
+                if (rawHeight % 4 != 0)
+                {
+                    int padding = 4 - (rawHeight % 4);
+                    maxY += padding; // 向下扩展
+                }
                 minX = Math.Max(0, minX);
                 minY = Math.Max(0, minY);
                 maxX = Math.Min(srcGray.Width, maxX);
@@ -399,49 +413,75 @@ namespace EdgeROIExtractor
                 int width = maxX - minX;
                 int height = maxY - minY;
 
+                // 再次检查对齐（如果因越界被裁剪了，这里强制丢弃最后几个像素以保全对齐）
+                width = width - (width % 4);
+                height = height - (height % 4);
+
                 if (width <= 0 || height <= 0) return null;
 
                 Rect roiRect = new Rect(minX, minY, width, height);
 
-                // 3. 直接裁剪 (Crop)
+                // 3. 裁剪并处理旋转
                 using (var roiMat = new Mat(srcGray, roiRect))
                 {
-                    // 将Mat转换为字节数组
-                    byte[] imageData = new byte[roiMat.Rows * roiMat.Cols];
+                    Mat finalMat = roiMat;
+                    bool isRotated = false;
 
-                    // 注意：这里需要考虑内存连续性，Mat的子图可能不连续
-                    if (roiMat.IsContinuous())
+                    try
                     {
-                        Marshal.Copy(roiMat.Data, imageData, 0, imageData.Length);
-                    }
-                    else
-                    {
-                        // 如果不连续，逐行复制
-                        for (int i = 0; i < roiMat.Rows; i++)
+                        // 自动检测方向并旋转
+                        // 如果 宽 > 高，说明是横向边，需要旋转成竖向
+                        if (finalMat.Width > finalMat.Height)
                         {
-                            IntPtr srcPtr = roiMat.Ptr(i);
-                            Marshal.Copy(srcPtr, imageData, i * roiMat.Cols, roiMat.Cols);
+                            var rotated = new Mat();
+                            Cv2.Rotate(roiMat, rotated, RotateFlags.Rotate90Clockwise);
+                            finalMat = rotated;
+                            isRotated = true;
+
+                            // 更新宽高
+                            width = finalMat.Width;
+                            height = finalMat.Height;
                         }
+
+                        // 将Mat转换为字节数组
+                        // 此时 width 一定是 4 的倍数，C++ 读取绝对安全
+                        byte[] imageData = new byte[finalMat.Rows * finalMat.Cols];
+
+                        if (finalMat.IsContinuous())
+                        {
+                            Marshal.Copy(finalMat.Data, imageData, 0, imageData.Length);
+                        }
+                        else
+                        {
+                            for (int i = 0; i < finalMat.Rows; i++)
+                            {
+                                IntPtr srcPtr = finalMat.Ptr(i);
+                                Marshal.Copy(srcPtr, imageData, i * finalMat.Cols, finalMat.Cols);
+                            }
+                        }
+
+                        var result = new ROIResult
+                        {
+                            ImageData = imageData,
+                            Width = width,
+                            Height = height,
+                            Center = new PointF(center.X, center.Y),
+                            EdgeIndex = edgeIndex,
+                            RoiLocation = new PointF(minX, minY)
+                        };
+
+                        for (int i = 0; i < 4; i++)
+                        {
+                            result.Quadrilateral[i] = new PointF(quadrilateral[i].X, quadrilateral[i].Y);
+                            result.SelectionArea[i] = new PointF(selectionRect[i].X, selectionRect[i].Y);
+                        }
+
+                        return result;
                     }
-
-                    // 创建ROI结果对象
-                    var result = new ROIResult
+                    finally
                     {
-                        ImageData = imageData,
-                        Width = width,   // 使用实际裁剪的宽度
-                        Height = height, // 使用实际裁剪的高度
-                        Center = new PointF(center.X, center.Y),
-                        EdgeIndex = edgeIndex,
-                        RoiLocation = new PointF(minX, minY)
-                    };
-
-                    for (int i = 0; i < 4; i++)
-                    {
-                        result.Quadrilateral[i] = new PointF(quadrilateral[i].X, quadrilateral[i].Y);
-                        result.SelectionArea[i] = new PointF(selectionRect[i].X, selectionRect[i].Y);
+                        if (isRotated && finalMat != null) finalMat.Dispose();
                     }
-
-                    return result;
                 }
             }
             catch (Exception ex)
