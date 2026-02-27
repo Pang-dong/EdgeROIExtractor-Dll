@@ -349,58 +349,42 @@ namespace EdgeROIExtractor
                 double normalLength = Math.Sqrt(normal.X * normal.X + normal.Y * normal.Y);
                 if (normalLength < 1e-6) return null;
 
-                double scaleFactor = 100.0;
-                Point normalUnit = new Point(
-                    (int)(normal.X / normalLength * scaleFactor),
-                    (int)(normal.Y / normalLength * scaleFactor)
-                );
+                double halfW = Math.Max(parameters.ExtensionWidth, 16);  // 半宽（跨边方向）
+                double desiredLen = parameters.ExtensionLength;
+                if (desiredLen <= 0) desiredLen = edgeLength;
 
-                int directionSign = parameters.ExtendInwards ? -1 : 1;
-                Point edgeMidPoint = new Point(
-                    (startPoint.X + endPoint.X) / 2,
-                    (startPoint.Y + endPoint.Y) / 2
-                );
+                // 只取边“中段”，避免把角点/相邻边一起截进去（这是 SFR 失败率高的最常见原因）
+                desiredLen = Math.Min(desiredLen, edgeLength);
+                if (desiredLen < 40) desiredLen = Math.Min(40, edgeLength);
+                double halfLen = desiredLen / 2.0;
 
-                Point fromMidToStart = new Point(
-                    startPoint.X - edgeMidPoint.X,
-                    startPoint.Y - edgeMidPoint.Y
-                );
-                Point fromMidToEnd = new Point(
-                    endPoint.X - edgeMidPoint.X,
-                    endPoint.Y - edgeMidPoint.Y
-                );
+                var edgeMid = new Point2d((startPoint.X + endPoint.X) / 2.0, (startPoint.Y + endPoint.Y) / 2.0);
+                var dirUnit = new Point2d(direction.X / edgeLength, direction.Y / edgeLength);
+                var normalUnitD = new Point2d(-dirUnit.Y, dirUnit.X);
 
-                float lengthScale = (float)parameters.ExtensionLength / 100.0f;
-                Point scaledStart = new Point(
-                    edgeMidPoint.X + (int)(fromMidToStart.X * lengthScale),
-                    edgeMidPoint.Y + (int)(fromMidToStart.Y * lengthScale)
-                );
-                Point scaledEnd = new Point(
-                    edgeMidPoint.X + (int)(fromMidToEnd.X * lengthScale),
-                    edgeMidPoint.Y + (int)(fromMidToEnd.Y * lengthScale)
-                );
+                var segStart = new Point2d(edgeMid.X - dirUnit.X * halfLen, edgeMid.Y - dirUnit.Y * halfLen);
+                var segEnd = new Point2d(edgeMid.X + dirUnit.X * halfLen, edgeMid.Y + dirUnit.Y * halfLen);
 
-                int widthOffset = parameters.ExtensionWidth * (int)scaleFactor / 100;
+                double sign = parameters.ExtendInwards ? -1.0 : 1.0; // 仅决定点顺序，不影响矩形本身
                 Point[] selectionRect = new Point[4];
-
                 selectionRect[0] = new Point(
-                    scaledStart.X + normalUnit.X * directionSign * widthOffset / (int)scaleFactor,
-                    scaledStart.Y + normalUnit.Y * directionSign * widthOffset / (int)scaleFactor
+                    (int)Math.Round(segStart.X + normalUnitD.X * sign * halfW),
+                    (int)Math.Round(segStart.Y + normalUnitD.Y * sign * halfW)
                 );
                 selectionRect[1] = new Point(
-                    scaledEnd.X + normalUnit.X * directionSign * widthOffset / (int)scaleFactor,
-                    scaledEnd.Y + normalUnit.Y * directionSign * widthOffset / (int)scaleFactor
+                    (int)Math.Round(segEnd.X + normalUnitD.X * sign * halfW),
+                    (int)Math.Round(segEnd.Y + normalUnitD.Y * sign * halfW)
                 );
                 selectionRect[2] = new Point(
-                    scaledEnd.X - normalUnit.X * directionSign * widthOffset / (int)scaleFactor,
-                    scaledEnd.Y - normalUnit.Y * directionSign * widthOffset / (int)scaleFactor
+                    (int)Math.Round(segEnd.X - normalUnitD.X * sign * halfW),
+                    (int)Math.Round(segEnd.Y - normalUnitD.Y * sign * halfW)
                 );
                 selectionRect[3] = new Point(
-                    scaledStart.X - normalUnit.X * directionSign * widthOffset / (int)scaleFactor,
-                    scaledStart.Y - normalUnit.Y * directionSign * widthOffset / (int)scaleFactor
+                    (int)Math.Round(segStart.X - normalUnitD.X * sign * halfW),
+                    (int)Math.Round(segStart.Y - normalUnitD.Y * sign * halfW)
                 );
 
-                return ExtractROI(srcGray, selectionRect, quadrilateral, center, selectedEdgeIndex, index);
+                return ExtractROI(srcGray, segStart, segEnd, halfW, selectionRect, quadrilateral, center, selectedEdgeIndex, index);
             }
             catch (Exception ex)
             {
@@ -411,22 +395,20 @@ namespace EdgeROIExtractor
         /// <summary>
         /// [修改版] 提取ROI区域：自动处理旋转 + 强制4字节内存对齐
         /// </summary>
-        private ROIResult ExtractROI(Mat srcGray, Point[] selectionRect,
-            Point[] quadrilateral, Point2f center, int edgeIndex, int index)
+        private ROIResult ExtractROI(Mat srcGray, Point2d segStart, Point2d segEnd, double halfWidth,
+            Point[] selectionRect, Point[] quadrilateral, Point2f center, int edgeIndex, int index)
         {
             try
             {
-                // 1. 计算 selectionRect 的外接矩形 (Bounding Rect)
-                int minX = int.MaxValue, minY = int.MaxValue;
-                int maxX = int.MinValue, maxY = int.MinValue;
+                // 1. 计算 ROI 的外接矩形（更“紧”的轴对齐矩形）
+                //    不直接用 selectionRect 的 BoundingRect：斜边会导致横向膨胀，容易把相邻边/角点带进来
+                int minX = (int)Math.Floor(Math.Min(segStart.X, segEnd.X) - halfWidth - 2);
+                int maxX = (int)Math.Ceiling(Math.Max(segStart.X, segEnd.X) + halfWidth + 2);
 
-                foreach (var pt in selectionRect)
-                {
-                    if (pt.X < minX) minX = pt.X;
-                    if (pt.X > maxX) maxX = pt.X;
-                    if (pt.Y < minY) minY = pt.Y;
-                    if (pt.Y > maxY) maxY = pt.Y;
-                }
+                double yPad = Math.Max(2.0, halfWidth * 0.35);
+                int minY = (int)Math.Floor(Math.Min(segStart.Y, segEnd.Y) - yPad);
+                int maxY = (int)Math.Ceiling(Math.Max(segStart.Y, segEnd.Y) + yPad);
+
                 int rawWidth = maxX - minX;
                 if (rawWidth % 4 != 0)
                 {
