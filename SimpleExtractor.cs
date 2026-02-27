@@ -77,6 +77,26 @@ namespace EdgeROIExtractor
                 return extractor.ExtractROIsFromColor(colorImageData, width, height, channels, parameters);
             }
         }
+        /// <summary>
+        /// [高性能接口] 直接传入OpenCvSharp的Mat对象，返回C++所需的数据结构
+        /// 建议在循环中复用 parameters 对象，不要每次都 new
+        /// </summary>
+        /// <param name="rgbMat">输入的三通道图像 (BGR/RGB)</param>
+        /// <param name="parameters">提取参数</param>
+        /// <returns>可直接传递给C++的数据列表</returns>
+        public static List<ROIDataForCpp> ExtractMatToCppData(Mat rgbMat, ExtractionParameters parameters)
+        {
+            // 即使在静态方法中，为了性能也建议复用 Engine 实例(ThreadLocal)或使用 using
+            // 这里为了安全使用 using，如果追求极致性能，可以将 engine 设为类成员复用
+            using (var extractor = new EdgeROIExtractorEngine())
+            {
+                // 1. 调用核心优化方法
+                var results = extractor.ExtractROIsFromMat(rgbMat, parameters);
+
+                // 2. 直接转换结果，避免中间层
+                return GetROIDataForCpp(results);
+            }
+        }
 
         /// <summary>
         /// 从文件加载图像并提取ROI

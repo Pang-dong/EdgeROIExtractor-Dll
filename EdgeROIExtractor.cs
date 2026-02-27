@@ -271,11 +271,51 @@ namespace EdgeROIExtractor
             }
         }
 
+
+        /// <summary>
+        /// 将四边形的4个点归一化为固定顺序：左上、左下、右下、右上
+        /// 目的：不管四边形是顺时针/逆时针、起点从哪个角开始，SelectedEdgeIndex 都能稳定对应同一条“物理边”
+        /// 例如：SelectedEdgeIndex=0 永远是“左竖边”，不会因为旋转方向不同而误选到横边。
+        /// </summary>
+        private static Point[] NormalizeQuadPoints(Point[] pts)
+        {
+            if (pts == null || pts.Length != 4) return pts;
+
+            // 1) 用 (x+y) 找左上(tl) 和 右下(br)
+            int minSum = int.MaxValue, maxSum = int.MinValue;
+            Point tl = pts[0], br = pts[0];
+
+            for (int i = 0; i < 4; i++)
+            {
+                int s = pts[i].X + pts[i].Y;
+                if (s < minSum) { minSum = s; tl = pts[i]; }
+                if (s > maxSum) { maxSum = s; br = pts[i]; }
+            }
+
+            // 2) 剩下两个点用 (x-y) 找右上(tr) 和 左下(bl)
+            int minDiff = int.MaxValue, maxDiff = int.MinValue;
+            Point tr = pts[0], bl = pts[0];
+
+            for (int i = 0; i < 4; i++)
+            {
+                Point p = pts[i];
+                if (p == tl || p == br) continue;
+
+                int d = p.X - p.Y;
+                if (d < minDiff) { minDiff = d; tr = p; }
+                if (d > maxDiff) { maxDiff = d; bl = p; }
+            }
+
+            // 3) 返回固定顺序：p1=左上、p2=左下、p3=右下、p4=右上
+            return new Point[] { tl, bl, br, tr };
+        }
+
         private ROIResult ProcessQuadrilateral(Mat srcGray, Point[] quadrilateral,
-            int index, ExtractionParameters parameters)
+                    int index, ExtractionParameters parameters)
         {
             try
             {
+                quadrilateral = NormalizeQuadPoints(quadrilateral);
                 Point p1 = quadrilateral[0], p2 = quadrilateral[1],
                       p3 = quadrilateral[2], p4 = quadrilateral[3];
 
@@ -368,11 +408,7 @@ namespace EdgeROIExtractor
                 return null;
             }
         }
-
         /// <summary>
-        /// [关键修改] 提取ROI区域：使用外接矩形直接裁剪，不进行透视变换
-        /// </summary>
-       /// <summary>
         /// [修改版] 提取ROI区域：自动处理旋转 + 强制4字节内存对齐
         /// </summary>
         private ROIResult ExtractROI(Mat srcGray, Point[] selectionRect,
@@ -590,6 +626,57 @@ namespace EdgeROIExtractor
             catch (Exception) { return null; }
         }
 
+        // 在 EdgeROIExtractorEngine 类中添加/修改以下方法
+
+        /// <summary>
+        /// [极速版] 直接处理Mat对象，避免 byte[] <-> Mat 的来回拷贝
+        /// </summary>
+        public ROIResults ExtractROIsFromMat(Mat srcMat, ExtractionParameters parameters = null)
+        {
+            var results = new ROIResults
+            {
+                OriginalImageSize = new System.Drawing.Size(srcMat.Cols, srcMat.Rows)
+            };
+
+            if (srcMat.Empty())
+            {
+                results.Success = false;
+                results.ErrorMessage = "输入Mat为空";
+                return results;
+            }
+
+            if (parameters == null) parameters = ExtractionParameters.Default();
+
+            var stopwatch = Stopwatch.StartNew();
+
+            try
+            {
+                // 优化点：直接在内部管理生命周期，不进行额外拷贝
+                using (var processingMat = new Mat())
+                {
+                    // 1. 通道处理：如果是彩色图，直接提取绿色通道（最快且符合你的逻辑）
+                    if (srcMat.Channels() == 3 || srcMat.Channels() == 4)
+                    {
+                        // 索引1是绿色通道 (BGR中的G)
+                        Cv2.ExtractChannel(srcMat, processingMat, 1);
+                    }
+                    else
+                    {
+                        srcMat.CopyTo(processingMat);
+                    }
+                    ProcessImage(processingMat, parameters, results);
+                }
+            }
+            catch (Exception ex)
+            {
+                results.Success = false;
+                results.ErrorMessage = $"处理Mat时发生错误: {ex.Message}";
+            }
+
+            stopwatch.Stop();
+            results.ProcessingTimeMs = stopwatch.ElapsedMilliseconds;
+            return results;
+        }
         public void Dispose()
         {
             Dispose(true);
